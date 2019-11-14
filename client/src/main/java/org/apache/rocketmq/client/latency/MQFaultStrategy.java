@@ -56,25 +56,31 @@ public class MQFaultStrategy {
     }
 
     public MessageQueue selectOneMessageQueue(final TopicPublishInfo tpInfo, final String lastBrokerName) {
-        if (this.sendLatencyFaultEnable) {
+        if (this.sendLatencyFaultEnable) {// 开启基于消息延时的高可用策略
             try {
+                // 一层负载-可用轮询：在可用的Queue列表上轮询获取一个可用队列
                 int index = tpInfo.getSendWhichQueue().getAndIncrement();
                 for (int i = 0; i < tpInfo.getMessageQueueList().size(); i++) {
                     int pos = Math.abs(index++) % tpInfo.getMessageQueueList().size();
                     if (pos < 0)
                         pos = 0;
                     MessageQueue mq = tpInfo.getMessageQueueList().get(pos);
+                    // 这里判断是否可用
                     if (latencyFaultTolerance.isAvailable(mq.getBrokerName())) {
                         if (null == lastBrokerName || mq.getBrokerName().equals(lastBrokerName))
                             return mq;
                     }
                 }
 
+                // 二层
+                // 2.1 从恢复时间较少的Queue中(前50%)轮询选一个broker
                 final String notBestBroker = latencyFaultTolerance.pickOneAtLeast();
+                // 获取该 broker 有几个 queue
                 int writeQueueNums = tpInfo.getQueueIdByBroker(notBestBroker);
-                if (writeQueueNums > 0) {
+                if (writeQueueNums > 0) {// ？？
+                    // 轮询从所有Queue里面选一个 ？？
                     final MessageQueue mq = tpInfo.selectOneMessageQueue();
-                    if (notBestBroker != null) {
+                    if (notBestBroker != null) { // ？？？直接把路由表里面的数据改了？？？
                         mq.setBrokerName(notBestBroker);
                         mq.setQueueId(tpInfo.getSendWhichQueue().getAndIncrement() % writeQueueNums);
                     }
@@ -89,6 +95,7 @@ public class MQFaultStrategy {
             return tpInfo.selectOneMessageQueue();
         }
 
+        // 没开启高可用，就轮询
         return tpInfo.selectOneMessageQueue(lastBrokerName);
     }
 

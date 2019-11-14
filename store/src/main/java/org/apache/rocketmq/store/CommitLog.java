@@ -571,6 +571,13 @@ public class CommitLog {
 
         long elapsedTimeInLock = 0;
         MappedFile unlockMappedFile = null;
+        /*
+         * CommitLog 文件是按照 1G 一个增量存储的
+         * 类似于如下：
+         * 00000000000000000000
+         * 00000000000000102400
+         * 这里获取最后一个 CommitLog 文件，即需要写入数据的文件
+         */
         MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
 
         putMessageLock.lock(); //spin or ReentrantLock ,depending on store config
@@ -582,6 +589,7 @@ public class CommitLog {
             // global
             msg.setStoreTimestamp(beginLockTimestamp);
 
+            // 如果最后一个文件满了，则创建新的文件
             if (null == mappedFile || mappedFile.isFull()) {
                 mappedFile = this.mappedFileQueue.getLastMappedFile(0); // Mark: NewFile may be cause noise
             }
@@ -649,9 +657,13 @@ public class CommitLog {
         // Synchronization flush
         if (FlushDiskType.SYNC_FLUSH == this.defaultMessageStore.getMessageStoreConfig().getFlushDiskType()) {
             final GroupCommitService service = (GroupCommitService) this.flushCommitLogService;
+            // 是否需要确定消息刷盘成功
             if (messageExt.isWaitStoreMsgOK()) {
+                // 组装刷盘请求
                 GroupCommitRequest request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
+                // 提交刷盘
                 service.putRequest(request);
+                // 等待刷盘结果
                 boolean flushOK = request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
                 if (!flushOK) {
                     log.error("do groupcommit, wait for flush failed, topic: " + messageExt.getTopic() + " tags: " + messageExt.getTags()
@@ -659,6 +671,9 @@ public class CommitLog {
                     putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_DISK_TIMEOUT);
                 }
             } else {
+                /*
+                 * 即使设置了同步刷盘，但不需要等待刷盘结果完成，此时会退化成异步刷盘
+                 */
                 service.wakeup();
             }
         }
@@ -789,8 +804,14 @@ public class CommitLog {
         storeStatsService.getSinglePutMessageTopicTimesTotal(messageExtBatch.getTopic()).addAndGet(result.getMsgNum());
         storeStatsService.getSinglePutMessageTopicSizeTotal(messageExtBatch.getTopic()).addAndGet(result.getWroteBytes());
 
+        /*
+         * 同步刷盘 & 异步刷盘
+         */
         handleDiskFlush(result, putMessageResult, messageExtBatch);
 
+        /*
+         * 主从同步
+         */
         handleHA(result, putMessageResult, messageExtBatch);
 
         return putMessageResult;
@@ -1076,6 +1097,7 @@ public class CommitLog {
 
         public synchronized void putRequest(final GroupCommitRequest request) {
             synchronized (this.requestsWrite) {
+                // 提交之后，由 doCommit 方法处理
                 this.requestsWrite.add(request);
             }
             if (hasNotified.compareAndSet(false, true)) {
@@ -1100,6 +1122,7 @@ public class CommitLog {
                             flushOK = CommitLog.this.mappedFileQueue.getFlushedWhere() >= req.getNextOffset();
 
                             if (!flushOK) {
+                                // 开始刷盘
                                 CommitLog.this.mappedFileQueue.flush(0);
                             }
                         }
